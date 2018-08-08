@@ -148,12 +148,14 @@ inAppPurchase.getProducts = function (productIds) {
   });
 };
 
-var executePaymentOfType = function executePaymentOfType(type, productId) {
+var executePaymentOfType = function executePaymentOfType(type, productId, oldProductIds = null) {
   return new Promise(function (resolve, reject) {
     if (!inAppPurchase.utils.validString(productId)) {
       reject(new Error(inAppPurchase.utils.errors[102]));
+    } else if(oldProductIds != null && !inAppPurchase.utils.validArrayOfStrings(oldProductIds)) {
+      reject(new Error(inAppPurchase.utils.errors[101]));
     } else {
-      nativeCall(type, [productId]).then(function (res) {
+      nativeCall(type, [productId, oldProductIds]).then(function (res) {
         resolve({
           signature: res.signature,
           productId: res.productId,
@@ -171,8 +173,8 @@ inAppPurchase.buy = function (productId) {
   return executePaymentOfType('buy', productId);
 };
 
-inAppPurchase.subscribe = function (productId) {
-  return executePaymentOfType('subscribe', productId);
+inAppPurchase.subscribe = function (productId, oldProductIds) {
+  return executePaymentOfType('subscribe', productId, oldProductIds);
 };
 
 inAppPurchase.consume = function (type, receipt, signature) {

@@ -27,6 +27,7 @@ import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaWebView;
 
 import com.alexdisler.inapppurchases.IabHelper.OnConsumeFinishedListener;
+import com.alexdisler.inapppurchases.IabHelper.IabAsyncInProgressException;
 
 import android.app.Activity;
 import android.content.Context;
@@ -49,6 +50,7 @@ public class InAppBillingV3 extends CordovaPlugin {
   public static final int ITEM_ALREADY_OWNED = -9;
   public static final int ITEM_NOT_OWNED = -10;
   public static final int CONSUME_FAILED = -11;
+  public static final int ALREADY_IN_PROGRESS = -12;
 
   public static final int PURCHASE_PURCHASED = 0;
   public static final int PURCHASE_CANCELLED = 1;
@@ -200,10 +202,25 @@ public class InAppBillingV3 extends CordovaPlugin {
     final String sku;
     try {
       sku = args.getString(0);
+      Log.d(TAG, "get sku:" + sku);
     } catch (JSONException e) {
       callbackContext.error(makeError("Invalid SKU", INVALID_ARGUMENTS));
       return false;
     }
+    List<String> oldSkus = null;
+    try {
+      JSONArray jOldProducts = args.getJSONArray(1);
+      if(jOldProducts.length() > 0) {
+        oldSkus = new ArrayList<String>();
+        for (int i = 0; i < jOldProducts.length(); i++) {
+          oldSkus.add(jOldProducts.getString(i));
+          Log.d(TAG, "get old sku:" + jOldProducts.getString(i));
+        }
+      }
+    } catch (JSONException e) {
+      Log.d(TAG, "no oldProductIds");
+    } //no error, because it may happen that we didn't reveive this at all.
+
     if (iabHelper == null || !billingInitialized) {
       callbackContext.error(makeError("Billing is not initialized", BILLING_NOT_INITIALIZED));
       return false;
@@ -247,9 +264,19 @@ public class InAppBillingV3 extends CordovaPlugin {
       }
     };
     if(subscribe){
-      iabHelper.launchSubscriptionPurchaseFlow(cordovaActivity, sku, newOrder, oipfl, "");
+      try {
+        iabHelper.launchSubscriptionPurchaseFlow(cordovaActivity, sku, newOrder, oipfl, "", oldSkus);
+      } catch (IabAsyncInProgressException e) {
+        callbackContext.error(makeError("Can't start a new call while another is in progress", ALREADY_IN_PROGRESS));
+        return false;
+      }
     } else {
-      iabHelper.launchPurchaseFlow(cordovaActivity, sku, newOrder, oipfl, "");
+      try {
+        iabHelper.launchPurchaseFlow(cordovaActivity, sku, newOrder, oipfl, "");
+      } catch (IabAsyncInProgressException e) {
+        callbackContext.error(makeError("Can't start a new call while another is in progress", ALREADY_IN_PROGRESS));
+        return false;
+      }
     }
     return true;
   }
@@ -281,28 +308,33 @@ public class InAppBillingV3 extends CordovaPlugin {
       callbackContext.error(makeError("Billing is not initialized", BILLING_NOT_INITIALIZED));
       return false;
     }
-    iabHelper.consumeAsync(purchase, new OnConsumeFinishedListener() {
-      public void onConsumeFinished(Purchase purchase, IabResult result) {
-        if (result.isFailure()) {
-          int response = result.getResponse();
-          if (response == IabHelper.BILLING_RESPONSE_RESULT_ITEM_NOT_OWNED) {
-            callbackContext.error(makeError("Error consuming purchase", ITEM_NOT_OWNED, result));
+    try {
+      iabHelper.consumeAsync(purchase, new OnConsumeFinishedListener() {
+        public void onConsumeFinished(Purchase purchase, IabResult result) {
+          if (result.isFailure()) {
+            int response = result.getResponse();
+            if (response == IabHelper.BILLING_RESPONSE_RESULT_ITEM_NOT_OWNED) {
+              callbackContext.error(makeError("Error consuming purchase", ITEM_NOT_OWNED, result));
+            } else {
+              callbackContext.error(makeError("Error consuming purchase", CONSUME_FAILED, result));
+            }
           } else {
-            callbackContext.error(makeError("Error consuming purchase", CONSUME_FAILED, result));
-          }
-        } else {
-          try {
-            JSONObject pluginResponse = new JSONObject();
-            pluginResponse.put("transactionId", purchase.getOrderId());
-            pluginResponse.put("productId", purchase.getSku());
-            pluginResponse.put("token", purchase.getToken());
-            callbackContext.success(pluginResponse);
-          } catch (JSONException e) {
-            callbackContext.error("Consume succeeded but success handler failed");
+            try {
+              JSONObject pluginResponse = new JSONObject();
+              pluginResponse.put("transactionId", purchase.getOrderId());
+              pluginResponse.put("productId", purchase.getSku());
+              pluginResponse.put("token", purchase.getToken());
+              callbackContext.success(pluginResponse);
+            } catch (JSONException e) {
+              callbackContext.error("Consume succeeded but success handler failed");
+            }
           }
         }
-      }
-    });
+      });
+    } catch (IabAsyncInProgressException e) {
+      callbackContext.error(makeError("Can't start a new call while another is in progress", ALREADY_IN_PROGRESS));
+      return false;
+    }
     return true;
   }
 
@@ -321,7 +353,8 @@ public class InAppBillingV3 extends CordovaPlugin {
       callbackContext.error(makeError("Billing is not initialized", BILLING_NOT_INITIALIZED));
       return false;
     }
-    iabHelper.queryInventoryAsync(true, moreSkus, new IabHelper.QueryInventoryFinishedListener() {
+    try {
+      iabHelper.queryInventoryAsync(true, moreSkus, moreSkus, new IabHelper.QueryInventoryFinishedListener() {
       public void onQueryInventoryFinished(IabResult result, Inventory inventory) {
         if (result.isFailure()) {
           callbackContext.error("Error retrieving SKU details");
@@ -340,42 +373,6 @@ public class InAppBillingV3 extends CordovaPlugin {
               detailsJson.put("price", skuDetails.getPrice());
               detailsJson.put("type", skuDetails.getType());
               detailsJson.put("currency", skuDetails.getPriceCurrency());
-              response.put(detailsJson);
-            }
-          }
-        } catch (JSONException e) {
-          callbackContext.error(e.getMessage());
-        }
-        callbackContext.success(response);
-      }
-    });
-    return true;
-  }
-
-  protected boolean restorePurchases(final JSONArray args, final CallbackContext callbackContext) {
-    if (iabHelper == null || !billingInitialized) {
-      callbackContext.error(makeError("Billing is not initialized", BILLING_NOT_INITIALIZED));
-    } else {
-      iabHelper.queryInventoryAsync(new IabHelper.QueryInventoryFinishedListener() {
-        public void onQueryInventoryFinished(IabResult result, Inventory inventory) {
-          if (result.isFailure()) {
-            callbackContext.error("Error retrieving purchase details");
-            return;
-          }
-          JSONArray response = new JSONArray();
-          try {
-            for (Purchase purchase : inventory.getAllPurchases()) {
-              if (purchase != null) {
-                JSONObject detailsJson = new JSONObject();
-                detailsJson.put("orderId", purchase.getOrderId());
-                detailsJson.put("packageName", purchase.getPackageName());
-                detailsJson.put("productId", purchase.getSku());
-                detailsJson.put("purchaseTime", purchase.getPurchaseTime());
-                detailsJson.put("purchaseState", purchase.getPurchaseState());
-                detailsJson.put("purchaseToken", purchase.getToken());
-                detailsJson.put("signature", purchase.getSignature());
-                detailsJson.put("type", purchase.getItemType());
-                detailsJson.put("receipt", purchase.getOriginalJson());
                 response.put(detailsJson);
               }
             }
@@ -385,6 +382,51 @@ public class InAppBillingV3 extends CordovaPlugin {
           callbackContext.success(response);
         }
       });
+    } catch (IabAsyncInProgressException e) {
+      callbackContext.error(makeError("Can't start a new call while another is in progress", ALREADY_IN_PROGRESS));
+      return false;
+    }
+    return true;
+  }
+
+  protected boolean restorePurchases(final JSONArray args, final CallbackContext callbackContext) {
+    if (iabHelper == null || !billingInitialized) {
+      callbackContext.error(makeError("Billing is not initialized", BILLING_NOT_INITIALIZED));
+    } else {
+      try {
+          iabHelper.queryInventoryAsync(new IabHelper.QueryInventoryFinishedListener() {
+            public void onQueryInventoryFinished(IabResult result, Inventory inventory) {
+              if (result.isFailure()) {
+                callbackContext.error("Error retrieving purchase details");
+                return;
+              }
+              JSONArray response = new JSONArray();
+              try {
+                for (Purchase purchase : inventory.getAllPurchases()) {
+                  if (purchase != null) {
+                    JSONObject detailsJson = new JSONObject();
+                    detailsJson.put("orderId", purchase.getOrderId());
+                    detailsJson.put("packageName", purchase.getPackageName());
+                    detailsJson.put("productId", purchase.getSku());
+                    detailsJson.put("purchaseTime", purchase.getPurchaseTime());
+                    detailsJson.put("purchaseState", purchase.getPurchaseState());
+                    detailsJson.put("purchaseToken", purchase.getToken());
+                    detailsJson.put("signature", purchase.getSignature());
+                    detailsJson.put("type", purchase.getItemType());
+                    detailsJson.put("receipt", purchase.getOriginalJson());
+                    response.put(detailsJson);
+                  }
+                }
+              } catch (JSONException e) {
+                callbackContext.error(e.getMessage());
+              }
+              callbackContext.success(response);
+            }
+          });
+      } catch (IabAsyncInProgressException e) {
+        callbackContext.error(makeError("Can't start a new call while another is in progress", ALREADY_IN_PROGRESS));
+        return false;
+      }
     }
     return true;
   }
@@ -399,7 +441,7 @@ public class InAppBillingV3 extends CordovaPlugin {
 
   @Override
   public void onDestroy() {
-    if (iabHelper != null) iabHelper.dispose();
+    if (iabHelper != null) iabHelper.disposeWhenFinished();
     iabHelper = null;
     billingInitialized = false;
   }
